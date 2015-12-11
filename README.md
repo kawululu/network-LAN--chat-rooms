@@ -205,3 +205,210 @@ HCURSOR CServerDlg::OnQueryDragIcon()
 	return (HCURSOR) m_hIcon;
 }
 
+//在CServerDlg类终止运行时进行的后续处理
+void CServerDlg::OnDestroy() 
+{
+	CDialog::OnDestroy();
+	
+	//删除侦听套接字
+	delete m_pSocket;
+	m_pSocket=NULL;
+	//向消息列表增加信息
+	CString strTemp;
+	strTemp="服务器终止服务！";
+	m_msgList.AddTail(strTemp);
+	//对连接列表进行处理
+	while (!m_connectionList.IsEmpty())
+	{
+		//向每一个连接的客户机发送"服务器终止服务！"的消息
+		//并逐个删除已建立的连接
+		CClientSocket* pSocket
+			=(CClientSocket*)m_connectionList.RemoveHead();
+		CMsg* pMsg=AssembleMsg(pSocket);
+		pMsg->m_bClose=TRUE;
+		SendMsg(pSocket,pMsg);
+		if (!pSocket->IsAborted())
+		{
+			pSocket->ShutDown();
+			BYTE Buffer[50];
+			while (pSocket->Receive(Buffer,50)>0);
+			delete pSocket;
+		}
+	}
+	//删除消息列表
+	m_msgList.RemoveAll();
+}
+
+//对所有的已连接的客户机的消息进行更新
+void CServerDlg::UpdateClients()
+{
+	for (POSITION pos=m_connectionList.GetHeadPosition();pos!=NULL;)
+		{
+			//获得连接列表的成员
+			CClientSocket* pSocket
+				=(CClientSocket*)m_connectionList.GetNext(pos);
+			//对客户机成员的消息列表进行分析
+			CMsg* pMsg=AssembleMsg(pSocket);
+			//客户机的消息列表需要进行更新
+			if (pMsg!=NULL)
+				//发送新的消息列表
+				//更新客户机消息列表的内容
+				SendMsg(pSocket,pMsg);
+		}
+}
+
+//接受连接请求
+void CServerDlg::OnAccept()
+{
+	CClientSocket* pSocket=new CClientSocket(this);
+	//接受连接请求
+	if (m_pSocket->Accept(*pSocket))
+	{
+		//对连接套接字初始化
+		pSocket->Initialize();
+		//假如连接列表
+		m_connectionList.AddTail(pSocket);
+	}
+	else
+		delete pSocket;
+}
+
+//获取客户机的发送消息
+void CServerDlg::OnReceive(CClientSocket* pSocket)
+{
+	do
+	{
+		//调用ReadMsg()读取消息
+		CMsg* pMsg=ReadMsg(pSocket);
+		if (pMsg->m_bClose)
+		{
+			//如果客户机关闭
+			//调用函数CloseSocket()将该与该客户机的连接从连接列表中删除
+			DeleteSocket(pSocket);
+			break;
+		}
+	}
+	while (!pSocket->m_pArchiveIn->IsBufferEmpty());
+	UpdateClients();
+}
+
+//分析消息列表
+CMsg* CServerDlg::AssembleMsg(CClientSocket* pSocket)
+{
+	static CMsg msg;
+	msg.Init();
+	//客户机的消息列表无需更新
+	if (pSocket->m_nMsgCount>=m_msgList.GetCount())
+		return NULL;
+
+	//客户机的消息列表需要更新
+	for (POSITION pos=m_msgList.FindIndex(pSocket->m_nMsgCount);pos!=NULL;)
+	{
+		//将缺少的消息增加到消息列表最后
+		CString strTemp=m_msgList.GetNext(pos);
+		msg.m_msgList.AddTail(strTemp);
+	}
+	pSocket->m_nMsgCount=m_msgList.GetCount();
+	UpdateInfo();
+	return& msg;
+}
+
+//读取消息
+CMsg* CServerDlg::ReadMsg(CClientSocket* pSocket)
+{
+	static CMsg msg;
+	TRY
+	{
+		//读取消息
+		pSocket->ReceiveMessage(&msg);
+		//显示接收的消息
+		DisplayMsg(msg.m_strText);
+		//更新消息列表
+		m_msgList.AddTail(msg.m_strText);
+	}
+	CATCH(CFileException,e)
+	{
+		//错误处理
+		CString strTemp;
+		strTemp="读取信息错误！";
+		msg.m_bClose=TRUE;
+		pSocket->Abort();
+	}
+	END_CATCH
+
+	return &msg;
+}
+
+//发送消息
+void CServerDlg::SendMsg(CClientSocket* pSocket,CMsg* pMsg)
+{
+	TRY
+	{
+		//发送消息
+		pSocket->SendMessage(pMsg);
+	}
+	CATCH(CFileException,e)
+	{
+		//错误处理
+		pSocket->Abort();
+		CString strTemp;
+		strTemp="发送信息错误！";
+		DisplayMsg(strTemp);
+	}
+	END_CATCH
+}
+
+//关闭套接字
+void CServerDlg::DeleteSocket(CClientSocket* pSocket)
+{
+	pSocket->Close();
+	POSITION pos,temp;
+
+	for (pos=m_connectionList.GetHeadPosition();pos!=NULL;)
+	{
+		//对于已经关闭的客户机
+		//在消息列表中将已经建立的连接删除
+		temp=pos;
+		CClientSocket* pSock=(CClientSocket*)m_connectionList.GetNext(pos);
+		//匹配成功
+		if (pSock==pSocket)
+		{
+			m_connectionList.RemoveAt(temp);
+			UpdateInfo();
+			break;
+		}
+	}
+	delete pSocket;
+}
+
+//在列表框显示消息
+void CServerDlg::DisplayMsg(LPCTSTR lpszMessage)
+{
+	//在列表框中显示消息
+	m_ListMsg.AddString(lpszMessage);
+
+	//更新系统信息
+	UpdateInfo();
+}
+
+//更新连接信息
+void CServerDlg::UpdateInfo()
+{
+	CString strTemp;
+	//更新在线人数
+	strTemp.Format("在线人数：%d",m_connectionList.GetCount());
+	m_StaNumber.SetWindowText(strTemp);
+
+	//更新信息数目
+	strTemp.Format("信息数：%d",m_msgList.GetCount());
+	m_StaMessage.SetWindowText(strTemp);
+}
+
+//按钮的事件处理函数
+void CServerDlg::OnStopServer() 
+{
+	// TODO: Add your control notification handler code here
+	//退出系统
+	CDialog::OnOK();
+}
+
